@@ -9,8 +9,8 @@ class HaarDecoderModel:
     def run_haar_analysis(self, window_half, sample_period):
         """
         Универсальный реалтайм-декодер гидравлического Манчестера.
-        ВСЕ фронты (START/TRUE/TECH) фиксируются по критерию
-        выхода в лимит отклонения от экстремума вейвлет-коэффициента.
+        ВСЕ фронты фиксируются по критерию выхода в лимит отклонения от экстремума.
+        Жесткое правило: маркер START выставляется ТОЛЬКО на перепадах вниз (DOWN).
         """
         total_samples = len(self.flow_data)
         self.detected_edges = []
@@ -44,11 +44,12 @@ class HaarDecoderModel:
         prev_D = 0.0
         trend_duration = 0
 
-        # --- СКВОЗНЫЕ ПЕРЕМЕННЫЕ КРИТЕРИЯ ЛИМИТА ОТКЛОНЕНИЯ ДЛЯ ВСЕХ ФРОНТОВ ---
-        peak_D = 0.0  # Пиковый экстремум текущей полуволны
-        first_stable_tick_offset = 0  # Ретроспективный сдвиг к моменту завершения перехода
-        in_stable_corridor = False  # Флаг удержания сигнала на полке вершины
-        corridor_ticks_count = 0  # Счетчик времени нахождения в коридоре стабильности
+        # --- СКВОЗНЫЕ ПЕРЕМЕННЫЕ КРИТЕРИЯ ЛИМИТА ОТКЛОНЕНИЯ ---
+        peak_D = 0.0
+        first_stable_tick_offset = 0
+        in_stable_corridor = False
+        corridor_ticks_count = 0
+
         true_bits_in_packet = 0  # Счетчик истинных бит в текущей посылке
 
         # Потоковый прогон массива через Си-логику скользящего окна Хаара
@@ -101,9 +102,9 @@ class HaarDecoderModel:
                     # 1. Фиксация подъема: отслеживаем глобальный максимум волны
                     if D > wave_threshold and trend_duration >= max(2, window_half // 12):
                         if D > peak_D:
-                            peak_D = D  # Обновляем пик нарастания
+                            peak_D = D
 
-                        deviation_limit = peak_D * 0.15  # Лимит отклонения 15%
+                        deviation_limit = peak_D * 0.15
 
                         if abs(D - peak_D) <= deviation_limit:
                             if not in_stable_corridor:
@@ -116,16 +117,13 @@ class HaarDecoderModel:
                             in_stable_corridor = False
                             corridor_ticks_count = 0
 
-                        # Критерий удержания: сигнал зафиксировался на полке
                         if corridor_ticks_count >= max(4, window_half // 8):
                             next_state = True
                             detected_edge = True
                             expect_down = True
 
-                            # Корректируем интервал: отматываем счетчик назад к моменту завершения перехода
                             ticks_since_any_edge -= first_stable_tick_offset
 
-                            # Сброс параметров слежения под следующий фронт
                             peak_D = 0.0
                             in_stable_corridor = False
                             corridor_ticks_count = 0
@@ -134,7 +132,7 @@ class HaarDecoderModel:
                     # 2. Фиксация спада: отслеживаем глобальный минимум волны
                     if D < -wave_threshold and trend_duration >= max(2, window_half // 12):
                         if D < peak_D:
-                            peak_D = D  # Обновляем пик спада
+                            peak_D = D
 
                         deviation_limit = abs(peak_D) * 0.15
 
@@ -173,10 +171,14 @@ class HaarDecoderModel:
                 marker_type = "TECH"
 
                 if not is_synchronized:
-                    is_synchronized = True
-                    true_bits_in_packet = 1
-                    marker_type = "START"
-                    self.detected_edges.append((actual_edge_index, current_state, marker_type))
+                    # ЖЕСТКОЕ ПРАВИЛО: START выставляется только если расход пошел вниз (DOWN)
+                    if current_state == False:
+                        is_synchronized = True
+                        true_bits_in_packet = 1
+                        marker_type = "START"
+                        self.detected_edges.append((actual_edge_index, current_state, marker_type))
+                    else:
+                        ticks_since_any_edge = 0
                 else:
                     is_valid_interval = False
                     is_true_bit = False
@@ -189,7 +191,7 @@ class HaarDecoderModel:
                         is_valid_interval = True
                         if self.detected_edges:
                             last_item = self.detected_edges[-1]
-                            last_type = last_item[2]  # Извлекаем marker_type из кортежа
+                            last_type = last_item[2]  # Извлекаем marker_type из кортежа истории
                             is_true_bit = (last_type == "TECH")
                         else:
                             is_true_bit = True
@@ -202,19 +204,29 @@ class HaarDecoderModel:
                             marker_type = "TECH"
                         self.detected_edges.append((actual_edge_index, current_state, marker_type))
                     else:
-                        # --- НАРУШЕНИЕ КРАТНОСТИ ---
-                        if true_bits_in_packet >= 3:
+                        # --- НАРУШЕНИЕ КРАТНОСТИ / ОКОНЧАНИЕ ПОСЫЛКИ ---
+                        # Если текущий сбойный фронт идет ВНИЗ, он может открыть новую посылку
+                        if current_state == False:
+                            # Проверяем длину завершившейся пачки
+                            if true_bits_in_packet < 3:
+                                while self.detected_edges:
+                                    popped = self.detected_edges.pop()
+                                    if popped[2] == "START":
+                                        break
+
                             true_bits_in_packet = 1
                             marker_type = "START"
+                            is_synchronized = True
                             self.detected_edges.append((actual_edge_index, current_state, marker_type))
                         else:
-                            while self.detected_edges:
-                                popped = self.detected_edges.pop()
-                                if popped[2] == "START":
-                                    break
-                            true_bits_in_packet = 1
-                            marker_type = "START"
-                            self.detected_edges.append((actual_edge_index, current_state, marker_type))
+                            # Если сбойный фронт идет вверх, то закрываем прием
+                            is_synchronized = False
+                            if true_bits_in_packet < 3:
+                                while self.detected_edges:
+                                    popped = self.detected_edges.pop()
+                                    if popped[2] == "START":
+                                        break
+                            true_bits_in_packet = 0
 
                 deadtime_ticks = max(4, int((BIT_PERIOD_TICKS / 2) * 0.12))
 

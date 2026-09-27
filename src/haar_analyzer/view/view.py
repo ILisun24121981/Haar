@@ -238,37 +238,41 @@ class HaarAnalyzerView(QMainWindow):
             # Формат вывода координаты X в зависимости от масштаба
             x_label_str = f"{time_pos:.1f}s" if self.time_step_sec != 1.0 else f"#{idx}"
 
+            # Направление физического изменения расхода
+            direction_str = "UP" if state else "DOWN"
+
             if marker_type == "START":
-                # Первая зафиксированная точка синхронизации посылки (Зеленый)
+                # Первая зафиксированная точка синхронизации посылки (Зеленый с указанием UP/DOWN)
                 line_pen = pg.mkPen(color='#27ae60', width=2, style=Qt.PenStyle.SolidLine)
                 line = pg.InfiniteLine(pos=time_pos, angle=90, pen=line_pen, movable=False)
                 self.plot_widget.addItem(line)
 
-                bit_text = f"START\n{x_label_str}"
+                bit_text = f"START ({direction_str})\n{x_label_str}"
                 text_item = pg.TextItem(text=bit_text, color='#ffffff', anchor=(0.5, 1.3), fill='#27ae60')
                 text_item.setPos(time_pos, y_pos)
                 self.plot_widget.addItem(text_item)
                 self.markers.append({'line': line, 'text': text_item, 'x': time_pos})
 
             elif marker_type == "TRUE":
-                # Истинный бит Манчестера в середине интервала (Красный)
+                # Истинный бит Манчестера в середине интервала (Красный с указанием 1/0)
                 line_pen = pg.mkPen(color='#e74c3c', width=1.5, style=Qt.PenStyle.DashLine)
                 line = pg.InfiniteLine(pos=time_pos, angle=90, pen=line_pen, movable=False)
                 self.plot_widget.addItem(line)
 
-                bit_text = f"1 (UP)\n{x_label_str}" if state else f"0 (DOWN)\n{x_label_str}"
+                bit_text = f"1 ({direction_str})\n{x_label_str}" if state else f"0 ({direction_str})\n{x_label_str}"
                 text_item = pg.TextItem(text=bit_text, color='#ffffff', anchor=(0.5, 1.3), fill='#e74c3c')
                 text_item.setPos(time_pos, y_pos)
                 self.plot_widget.addItem(text_item)
                 self.markers.append({'line': line, 'text': text_item, 'x': time_pos})
 
             elif marker_type == "TECH":
-                # Технологический граничный фронт переключения насоса (Фиолетовый)
+                # Технологический граничный фронт переключения насоса (Фиолетовый с указанием UP/DOWN)
                 line_pen = pg.mkPen(color='#9b59b6', width=1.2, style=Qt.PenStyle.DotLine)
                 line = pg.InfiniteLine(pos=time_pos, angle=90, pen=line_pen, movable=False)
                 self.plot_widget.addItem(line)
 
-                tech_text = f"TECH\n{x_label_str}"
+                # Добавлено отображение направления для фиолетовых карточек TECH
+                tech_text = f"TECH ({direction_str})\n{x_label_str}"
                 text_item = pg.TextItem(text=tech_text, color='#ffffff', anchor=(0.5, 1.3), fill='#9b59b6')
                 text_item.setPos(time_pos, y_pos)
                 self.plot_widget.addItem(text_item)
@@ -286,7 +290,7 @@ class HaarAnalyzerView(QMainWindow):
                 return
 
             x_range, _ = view_box.viewRange()
-            threshold = (x_range[1] - x_range[0]) * 0.005
+            threshold = (x_range - x_range) * 0.005
 
             for m in self.markers:
                 if abs(m['x'] - click_x) <= threshold:
