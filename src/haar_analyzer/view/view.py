@@ -87,7 +87,6 @@ class HaarAnalyzerView(QMainWindow):
         self.input_window = QLineEdit("10")
         self.input_window.setFixedWidth(60)
         control_layout.addWidget(self.input_window)
-
         control_layout.addWidget(QLabel("Период записи (SAMPLE_PERIOD_MS):"))
         self.input_period = QLineEdit("20")
         self.input_period.setFixedWidth(60)
@@ -112,7 +111,7 @@ class HaarAnalyzerView(QMainWindow):
         self.plot_widget.setBackground('w')
         self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
         self.plot_widget.setLabel('left', 'Расход (FlowRate)', color='#000000', size='11pt', bold=True)
-        self.plot_widget.setLabel('bottom', 'Время (индексы отсчетов)', color='#000000', size='11pt', bold=True)
+        self.plot_widget.setLabel('bottom', 'Время (секунды)', color='#000000', size='11pt', bold=True)
         main_layout.addWidget(self.plot_widget)
 
         self.plot_widget.scene().sigMouseClicked.connect(self.on_scene_clicked)
@@ -271,7 +270,6 @@ class HaarAnalyzerView(QMainWindow):
                 line = pg.InfiniteLine(pos=time_pos, angle=90, pen=line_pen, movable=False)
                 self.plot_widget.addItem(line)
 
-                # Добавлено отображение направления для фиолетовых карточек TECH
                 tech_text = f"TECH ({direction_str})\n{x_label_str}"
                 text_item = pg.TextItem(text=tech_text, color='#ffffff', anchor=(0.5, 1.3), fill='#9b59b6')
                 text_item.setPos(time_pos, y_pos)
@@ -279,7 +277,7 @@ class HaarAnalyzerView(QMainWindow):
                 self.markers.append({'line': line, 'text': text_item, 'x': time_pos})
 
     def on_scene_clicked(self, event):
-        """Интеграция установки маркеров по двойному клику с автоматическим поиском по времени."""
+        """Интеграция установки маркеров по двойному клику с автоматической передачей индекса в таблицу."""
         if event.double():
             scene_pos = event.scenePos()
             view_box = self.plot_widget.getViewBox()
@@ -306,6 +304,7 @@ class HaarAnalyzerView(QMainWindow):
             exact_y = self.raw_y_visual[closest_idx]
             original_table_row = self.raw_indices[closest_idx]
 
+            # Отрисовка ручного черного (темно-синего) маркера
             line_pen = pg.mkPen(color='#2c3e50', width=1.5, style=Qt.PenStyle.DashLine)
             line = pg.InfiniteLine(pos=exact_x, angle=90, pen=line_pen, movable=False)
             self.plot_widget.addItem(line)
@@ -317,6 +316,8 @@ class HaarAnalyzerView(QMainWindow):
             self.plot_widget.addItem(text_item)
 
             self.markers.append({'line': line, 'text': text_item, 'x': exact_x})
+
+            # Отправка сигнала в контроллер для фиксации строки в таблице
             self.marker_placed.emit(int(original_table_row))
             event.accept()
 

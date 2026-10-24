@@ -8,9 +8,9 @@ class HaarDecoderModel:
 
     def run_haar_analysis(self, window_half, sample_period):
         """
-        Универсальный реалтайм-декодер гидравлического Манчестера.
+        РЕАЛТАЙМ-декодер гидравлического Манчестера.
         ВСЕ фронты фиксируются по критерию выхода в лимит отклонения от экстремума.
-        Жесткое правило: маркер START выставляется ТОЛЬКО на перепадах вниз (DOWN).
+        Метка времени сдвигается ретроспективно ровно на СЕРЕДИНУ коридора удержания.
         """
         total_samples = len(self.flow_data)
         self.detected_edges = []
@@ -42,14 +42,15 @@ class HaarDecoderModel:
         ALPHA_AMP = 0.05
         expect_down = False
         prev_D = 0.0
-        trend_duration = 0
 
         # --- СКВОЗНЫЕ ПЕРЕМЕННЫЕ КРИТЕРИЯ ЛИМИТА ОТКЛОНЕНИЯ ---
-        peak_D = 0.0
-        first_stable_tick_offset = 0
-        in_stable_corridor = False
-        corridor_ticks_count = 0
+        peak_D = 0.0  # Зафиксированный пиковый экстремум
+        first_stable_tick_offset = 0  # Общее время нахождения внутри лимита (в тиках)
+        in_stable_corridor = False  # Флаг удержания сигнала на полке вершины
+        corridor_ticks_count = 0  # Счетчик времени нахождения в коридоре стабильности
 
+        # Флаг того, что сигнал пробил порог амплитуды и движется к пику
+        is_searching_peak = False
         true_bits_in_packet = 0  # Счетчик истинных бит в текущей посылке
 
         # Потоковый прогон массива через Си-логику скользящего окна Хаара
@@ -78,86 +79,96 @@ class HaarDecoderModel:
             local_amp = (ALPHA_AMP * abs(D)) + (1.0 - ALPHA_AMP) * local_amp
             wave_threshold = max(local_amp * 0.35, 1.5)
 
-            # Валидатор тренда для защиты от ЧМ/ФМ-помех
-            if not expect_down:
-                if d_derivative > 0.01:
-                    trend_duration += 1
-                else:
-                    trend_duration = 0
-            else:
-                if d_derivative < -0.01:
-                    trend_duration += 1
-                else:
-                    trend_duration = 0
-
             ticks_since_any_edge += 1
             ticks_in_current_state += 1
 
             detected_edge = False
             next_state = current_state
 
-            # --- СКВОЗНОЙ КРИТЕРИЙ ЛИМИТА ОТКЛОНЕНИЯ ДЛЯ ВСЕХ ФРОНТОВ ---
+            # --- СКВОЗНОЙ КРИТЕРИЙ ПИК-ДЕТЕКТОРА С ПРИВЯЗКОЙ К СЕРЕДИНЕ КОРИДОРА ---
             if ticks_in_current_state > deadtime_ticks:
                 if not expect_down:
-                    # 1. Фиксация подъема: отслеживаем глобальный максимум волны
-                    if D > wave_threshold and trend_duration >= max(2, window_half // 12):
-                        if D > peak_D:
+                    # 1. Ожидаем ПОДЪЕМ расхода
+                    if not is_searching_peak:
+                        if D > wave_threshold and d_derivative > 0.01:
+                            is_searching_peak = True
                             peak_D = D
-
-                        deviation_limit = peak_D * 0.15
-
-                        if abs(D - peak_D) <= deviation_limit:
-                            if not in_stable_corridor:
-                                in_stable_corridor = True
-                                first_stable_tick_offset = 0
-                            else:
-                                first_stable_tick_offset += 1
-                            corridor_ticks_count += 1
+                    else:
+                        if d_derivative > 0.01:
+                            if D > peak_D:
+                                peak_D = D
+                            in_stable_corridor = False
+                            corridor_ticks_count = 0
                         else:
-                            in_stable_corridor = False
-                            corridor_ticks_count = 0
+                            # Проверяем лимит отклонения 15% от замершего пика
+                            deviation_limit = peak_D * 0.15
+                            if abs(D - peak_D) <= deviation_limit:
+                                if not in_stable_corridor:
+                                    in_stable_corridor = True
+                                    first_stable_tick_offset = 0
+                                else:
+                                    first_stable_tick_offset += 1
+                                corridor_ticks_count += 1
+                            else:
+                                in_stable_corridor = False
+                                corridor_ticks_count = 0
 
-                        if corridor_ticks_count >= max(4, window_half // 8):
-                            next_state = True
-                            detected_edge = True
-                            expect_down = True
+                            # Критерий удержания вершины полки сигнала (около 2 секунд)
+                            if corridor_ticks_count >= max(4, window_half // 8):
+                                next_state = True
+                                detected_edge = True
+                                expect_down = True
 
-                            ticks_since_any_edge -= first_stable_tick_offset
+                                # ИЗМЕНЕНО: Сдвигаем маркер назад строго на СЕРЕДИНУ коридора стабилизации
+                                offset_to_middle = first_stable_tick_offset // 2
+                                ticks_since_any_edge -= offset_to_middle
+                                actual_edge_index = max(0, i - window_half - offset_to_middle)
 
-                            peak_D = 0.0
-                            in_stable_corridor = False
-                            corridor_ticks_count = 0
-                            trend_duration = 0
+                                # Полный сброс флагов для следующего такта
+                                peak_D = 0.0
+                                is_searching_peak = False
+                                in_stable_corridor = False
+                                corridor_ticks_count = 0
                 else:
-                    # 2. Фиксация спада: отслеживаем глобальный минимум волны
-                    if D < -wave_threshold and trend_duration >= max(2, window_half // 12):
-                        if D < peak_D:
+                    # 2. Ожидаем СПАД расхода
+                    if not is_searching_peak:
+                        if D < -wave_threshold and d_derivative < -0.01:
+                            is_searching_peak = True
                             peak_D = D
-
-                        deviation_limit = abs(peak_D) * 0.15
-
-                        if abs(D - peak_D) <= deviation_limit:
-                            if not in_stable_corridor:
-                                in_stable_corridor = True
-                                first_stable_tick_offset = 0
-                            else:
-                                first_stable_tick_offset += 1
-                            corridor_ticks_count += 1
+                    else:
+                        if d_derivative < -0.01:
+                            if D < peak_D:
+                                peak_D = D
+                            in_stable_corridor = False
+                            corridor_ticks_count = 0
                         else:
-                            in_stable_corridor = False
-                            corridor_ticks_count = 0
+                            # Проверяем лимит отклонения от замершего минимума
+                            deviation_limit = abs(peak_D) * 0.15
+                            if abs(D - peak_D) <= deviation_limit:
+                                if not in_stable_corridor:
+                                    in_stable_corridor = True
+                                    first_stable_tick_offset = 0
+                                else:
+                                    first_stable_tick_offset += 1
+                                corridor_ticks_count += 1
+                            else:
+                                in_stable_corridor = False
+                                corridor_ticks_count = 0
 
-                        if corridor_ticks_count >= max(4, window_half // 8):
-                            next_state = False
-                            detected_edge = True
-                            expect_down = False
+                            if corridor_ticks_count >= max(4, window_half // 8):
+                                next_state = False
+                                detected_edge = True
+                                expect_down = False
 
-                            ticks_since_any_edge -= first_stable_tick_offset
+                                # ИЗМЕНЕНО: Сдвигаем маркер спада назад строго на СЕРЕДИНУ коридора стабилизации
+                                offset_to_middle = first_stable_tick_offset // 2
+                                ticks_since_any_edge -= offset_to_middle
+                                actual_edge_index = max(0, i - window_half - offset_to_middle)
 
-                            peak_D = 0.0
-                            in_stable_corridor = False
-                            corridor_ticks_count = 0
-                            trend_duration = 0
+                                peak_D = 0.0
+                                is_searching_peak = False
+                                in_stable_corridor = False
+                                corridor_ticks_count = 0
 
             # Конечный автомат пачечной селекции Манчестера
             if detected_edge:
@@ -167,11 +178,10 @@ class HaarDecoderModel:
                 current_state = next_state
 
                 tolerance = int(HALF_PERIOD_TICKS * 0.35)
-                actual_edge_index = max(0, i - window_half)
                 marker_type = "TECH"
 
                 if not is_synchronized:
-                    # ЖЕСТКОЕ ПРАВИЛО: START выставляется только если расход пошел вниз (DOWN)
+                    # Стартовым может быть только фронт вниз (DOWN)
                     if current_state == False:
                         is_synchronized = True
                         true_bits_in_packet = 1
@@ -205,9 +215,7 @@ class HaarDecoderModel:
                         self.detected_edges.append((actual_edge_index, current_state, marker_type))
                     else:
                         # --- НАРУШЕНИЕ КРАТНОСТИ / ОКОНЧАНИЕ ПОСЫЛКИ ---
-                        # Если текущий сбойный фронт идет ВНИЗ, он может открыть новую посылку
                         if current_state == False:
-                            # Проверяем длину завершившейся пачки
                             if true_bits_in_packet < 3:
                                 while self.detected_edges:
                                     popped = self.detected_edges.pop()
@@ -219,7 +227,6 @@ class HaarDecoderModel:
                             is_synchronized = True
                             self.detected_edges.append((actual_edge_index, current_state, marker_type))
                         else:
-                            # Если сбойный фронт идет вверх, то закрываем прием
                             is_synchronized = False
                             if true_bits_in_packet < 3:
                                 while self.detected_edges:
